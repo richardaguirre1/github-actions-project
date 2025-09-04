@@ -114,3 +114,4 @@ jobs:
       with:
         push: true
         tags: richarddevops/bankapp:latest
+        file: ./Dockerfile
