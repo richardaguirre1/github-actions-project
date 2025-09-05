@@ -23,16 +23,15 @@ jobs:
     needs: compile
     steps:
     - uses: actions/checkout@v4
-
     - name: Trivy Installation
       run: |
-        sudo apt-get install wget apt-transport-https gnupg lsb-release
+        sudo apt-get install wget apt-transport-https gnupg lsb-release -y
         wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
         echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
         sudo apt-get update -y
         sudo apt-get install -y trivy
     - name: Trivy FS Scan
-      run: trivy fs --format table -o fs-report.json . 
+      run: trivy fs --format table -o fs-report.json .
     - name: Gitleaks Installation 
       run: sudo apt install gitleaks -y
     - name: Gitleaks Code Scan 
@@ -52,7 +51,7 @@ jobs:
     - name: Unit Test Cases
       run: mvn test
 
-  build_project_and_sonar_scan:
+  build_docker_image_and_push:
     runs-on: self-hosted
     needs: test
     steps:
@@ -63,44 +62,8 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
         cache: maven
-    - name: Build Project
-      run: mvn package
-      
-    - name: Upload JAR artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: app-jar
-        path: target/*.jar
-              
-    - uses: actions/checkout@v4
-      with:
-        # Disabling shallow clones is recommended for improving the relevancy of reporting
-        fetch-depth: 0
-    - name: SonarQube Scan
-      uses: SonarSource/sonarqube-scan-action@v5.3.1 # Ex: v4.1.0, See the latest version at https://github.com/marketplace/actions/official-sonarqube-scan
-      env:
-        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
-
-    - name: SonarQube Quality Gate check
-      id: sonarqube-quality-gate-check
-      uses: sonarsource/sonarqube-quality-gate-action@master
-      with:
-        pollingTimeoutSec: 600
-      env:
-        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
-    
-  build_docker_image_and_push:
-    runs-on: self-hosted
-    needs: build_project_and_sonar_scan
-    steps:
-    - uses: actions/checkout@v4
-    - name: Download JAR artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: app-jar
-        path: app  # this will download JAR to ./app folder
+    - name: Build Project (compile & package)
+      run: mvn clean package
     - name: Login to Docker Hub
       uses: docker/login-action@v3
       with:
@@ -117,18 +80,15 @@ jobs:
         push: true
         tags: richardaguirrecloud/bankapp:latest
         file: ./Dockerfile
+        build-args: |
+          JAR_FILE=target/*.jar
+        no-cache: true  # fuerza a no usar cache y reflejar cambios de código
 
   deploy_to_kubernetes:
     runs-on: self-hosted
     needs: build_docker_image_and_push
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-    - name: Install AWS CLI
-      run: |
-        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-        unzip awscliv2.zip
-        sudo ./aws/install --update
+    - uses: actions/checkout@v4
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v2
       with:
@@ -144,5 +104,4 @@ jobs:
         mkdir -p $HOME/.kube
         echo "${{ secrets.EKS_KUBECONFIG }}" > $HOME/.kube/config
     - name: Deploy to EKS
-      run: |
-        kubectl apply -f ds.yml
+      run: kubectl apply -f ds.yml
