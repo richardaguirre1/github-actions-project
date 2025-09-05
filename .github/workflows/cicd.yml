@@ -5,7 +5,7 @@ on:
     branches: [ "main" ]
  
 jobs:
-  compile:
+  compile_and_test:
     runs-on: self-hosted
     steps:
     - uses: actions/checkout@v4
@@ -15,31 +15,51 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
         cache: maven
-    - name: Build with Maven
-      run: mvn compile
+    - name: Build & Unit Tests
+      run: |
+        mvn clean package
+        mvn test
 
-  security-checks:
+  security_checks:
     runs-on: ubuntu-latest
-    needs: compile
+    needs: compile_and_test
     steps:
     - uses: actions/checkout@v4
-    - name: Trivy Installation
+    - name: Trivy FS Scan
       run: |
         sudo apt-get install wget apt-transport-https gnupg lsb-release -y
         wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
         echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
         sudo apt-get update -y
         sudo apt-get install -y trivy
-    - name: Trivy FS Scan
-      run: trivy fs --format table -o fs-report.json .
-    - name: Gitleaks Installation 
-      run: sudo apt install gitleaks -y
-    - name: Gitleaks Code Scan 
-      run: gitleaks detect source . -r gitleaks-report.json -f json
+        trivy fs --format table -o fs-report.json .
+    - name: Gitleaks Code Scan
+      run: |
+        sudo apt install gitleaks -y
+        gitleaks detect source . -r gitleaks-report.json -f json
 
-  test:
+  sonar_scan:
     runs-on: self-hosted
-    needs: security-checks
+    needs: security_checks
+    steps:
+    - uses: actions/checkout@v4
+    - name: SonarQube Scan
+      uses: SonarSource/sonarqube-scan-action@v5.3.1
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+    - name: SonarQube Quality Gate
+      id: sonarqube-quality-gate-check
+      uses: sonarsource/sonarqube-quality-gate-action@master
+      with:
+        pollingTimeoutSec: 600
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+
+  build_and_push_docker:
+    runs-on: self-hosted
+    needs: sonar_scan
     steps:
     - uses: actions/checkout@v4
     - name: Set up JDK 17
@@ -48,21 +68,7 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
         cache: maven
-    - name: Unit Test Cases
-      run: mvn test
-
-  build_docker_image_and_push:
-    runs-on: self-hosted
-    needs: test
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
-        cache: maven
-    - name: Build Project (compile & package)
+    - name: Build Java Project
       run: mvn clean package
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -73,20 +79,20 @@ jobs:
       uses: docker/setup-qemu-action@v3
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-    - name: Build and Push Docker image
+    - name: Build & Push Docker image
       uses: docker/build-push-action@v6
       with:
         context: .
+        file: ./Dockerfile
         push: true
         tags: richardaguirrecloud/bankapp:latest
-        file: ./Dockerfile
         build-args: |
           JAR_FILE=target/*.jar
-        no-cache: true  # fuerza a no usar cache y reflejar cambios de código
+        no-cache: true
 
   deploy_to_kubernetes:
     runs-on: self-hosted
-    needs: build_docker_image_and_push
+    needs: build_and_push_docker
     steps:
     - uses: actions/checkout@v4
     - name: Configure AWS credentials
@@ -105,3 +111,4 @@ jobs:
         echo "${{ secrets.EKS_KUBECONFIG }}" > $HOME/.kube/config
     - name: Deploy to EKS
       run: kubectl apply -f ds.yml
+
